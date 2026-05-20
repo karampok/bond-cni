@@ -15,4 +15,4 @@ unittest:
 		-v $(CURDIR)/.gomodcache:/go/pkg/mod \
 		-w /workspace \
 		golang:1.25 \
-		go test -race -covermode=atomic -coverprofile=profile.out ./bond/ $(ARG)
+		go test -race -covermode=atomic -coverprofile=profile.out ./... $(ARG)
