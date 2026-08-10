@@ -48,6 +48,7 @@ type bondingConfig struct {
 	AllSlavesActive *int    `json:"allSlavesActive,omitempty"`
 	TlbDynamicLb    *int    `json:"tlbDynamicLb,omitempty"`
 	XmitHashPolicy  *string `json:"xmitHashPolicy,omitempty"`
+	LacpRate        *string `json:"lacpRate,omitempty"`
 }
 
 var bondCni = "bond"
@@ -95,6 +96,16 @@ func loadConfigFile(bytes []byte) (*bondingConfig, string, error) {
 
 	if bondConf.XmitHashPolicy != nil && netlink.StringToBondXmitHashPolicy(*bondConf.XmitHashPolicy) == netlink.BOND_XMIT_HASH_POLICY_UNKNOWN {
 		return nil, "", fmt.Errorf("xmitHashPolicy is not supported, actual: %+v", *bondConf.XmitHashPolicy)
+	}
+
+	if bondConf.LacpRate != nil {
+		bondMode := netlink.StringToBondMode(bondConf.Mode)
+		if bondMode != netlink.BOND_MODE_802_3AD {
+			return nil, "", fmt.Errorf("lacpRate is only supported in 802.3ad mode, actual: %+v", bondConf.Mode)
+		}
+		if netlink.StringToBondLacpRate(*bondConf.LacpRate) == netlink.BOND_LACP_RATE_UNKNOWN {
+			return nil, "", fmt.Errorf("lacpRate is not supported, actual: %+v", *bondConf.LacpRate)
+		}
 	}
 
 	return bondConf, bondConf.CNIVersion, nil
@@ -165,6 +176,10 @@ func createBondedLink(bondName string, bondConf *bondingConfig, netNsHandle *net
 
 	if bondConf.XmitHashPolicy != nil {
 		bondLinkObj.XmitHashPolicy = netlink.StringToBondXmitHashPolicy(*bondConf.XmitHashPolicy)
+	}
+
+	if bondConf.LacpRate != nil {
+		bondLinkObj.LacpRate = netlink.StringToBondLacpRate(*bondConf.LacpRate)
 	}
 
 	err = netNsHandle.LinkAdd(bondLinkObj)

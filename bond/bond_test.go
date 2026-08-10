@@ -38,6 +38,7 @@ const (
 	Slave2           string = "net2"
 	ActiveBackupMode        = "active-backup"
 	BalanceTlbMode          = "balance-tlb"
+	LACPMode                = "802.3ad"
 	DefaultMTU              = 1400
 )
 
@@ -195,6 +196,52 @@ var _ = Describe("bond plugin", func() {
 			Entry("When Version is 0.2.0", "0.2.0"),
 			Entry("When Version is 0.1.0", "0.1.0"),
 		)
+
+		It("verifies a plugin creates a bond in 802.3ad (LACP) mode with fast lacp rate", func() {
+			lacpConfig := `{
+			"name": "bond",
+			"type": "bond",
+			"cniVersion": "1.0.0",
+			"mode": "802.3ad",
+			"failOverMac": 1,
+			"linksInContainer": true,
+			"miimon": "100",
+			"mtu": 1400,
+			"lacpRate": "fast",
+			"links": [
+				{"name": "net1"},
+				{"name": "net2"}
+			]
+		}`
+			args.StdinData = []byte(lacpConfig)
+
+			By("creating the plugin")
+			r, _, err := testutils.CmdAddWithArgs(args, func() error {
+				return cmdAdd(args)
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("validating the returned result is correct")
+			checkAddReturnResult(&r, IfName)
+
+			err = podNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+				By("validating the bond interface is configured correctly")
+				link, err := netlinksafe.LinkByName(IfName)
+				Expect(err).NotTo(HaveOccurred())
+				validateBondIFConf(link, DefaultMTU, LACPMode, 100, "fast")
+
+				By("validating the bond slaves are configured correctly")
+				validateBondSlavesConf(link, Slaves)
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("validating the bond interface is deleted correctly")
+			err = testutils.CmdDel(podNS.Path(),
+				args.ContainerID, "", func() error { return cmdDel(args) })
+			Expect(err).NotTo(HaveOccurred())
+		})
 
 		It("verifies the plugin copes with duplicated macs in balance-tlb mode", func() {
 			args.StdinData = []byte(fmt.Sprintf(config, "0.3.1", BalanceTlbMode, 1, strconv.FormatBool(linksInContainer), strconv.Itoa(DefaultMTU)))
@@ -642,6 +689,88 @@ var _ = Describe("bond plugin", func() {
 		})
 	})
 
+	When("lacpRate is configured", func() {
+		var config string
+		BeforeEach(func() {
+			var err error
+
+			config = `{
+			"name": "bond",
+			"type": "bond",
+			"cniVersion": "1.0.0",
+			"mode": "%s",
+			"failOverMac": 1,
+			"linksInContainer": true,
+			"miimon": "100",
+			"mtu": 1400,
+			"links": [
+				{"name": "net1"},
+				{"name": "net2"}
+			],
+            "lacpRate": "%s"
+		}`
+
+			linksInContainer = true
+			linkAttrs := []netlink.LinkAttrs{
+				{Name: Slave1},
+				{Name: Slave2},
+			}
+			podNS, err = testutils.NewNS()
+			Expect(err).NotTo(HaveOccurred())
+			addLinksInNS(podNS, linkAttrs)
+		})
+
+		DescribeTable("Verify lacpRate is properly set", func(lacpRate string) {
+			args := &skel.CmdArgs{
+				ContainerID: "dummy",
+				Netns:       podNS.Path(),
+				IfName:      IfName,
+				StdinData:   []byte(fmt.Sprintf(config, LACPMode, lacpRate)),
+			}
+			By("creating the plugin")
+			r, _, err := testutils.CmdAddWithArgs(args, func() error {
+				return cmdAdd(args)
+			})
+
+			if netlink.StringToBondLacpRate(lacpRate) == netlink.BOND_LACP_RATE_UNKNOWN {
+				Expect(err).To(HaveOccurred())
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+
+			By("validating the returned result is correct")
+			checkAddReturnResult(&r, IfName)
+
+			err = podNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+				By("validating the bond interface is configured correctly")
+				link, err := netlinksafe.LinkByName(IfName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(link.(*netlink.Bond).LacpRate.String()).To(Equal(lacpRate))
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		},
+			Entry("lacpRate is slow", "slow"),
+			Entry("lacpRate is fast", "fast"),
+			Entry("lacpRate is invalid", "turbo"),
+		)
+
+		It("should fail if mode is not 802.3ad", func() {
+			args := &skel.CmdArgs{
+				ContainerID: "dummy",
+				Netns:       podNS.Path(),
+				IfName:      IfName,
+				StdinData:   []byte(fmt.Sprintf(config, ActiveBackupMode, "fast")),
+			}
+			By("creating the plugin")
+			_, _, err := testutils.CmdAddWithArgs(args, func() error {
+				return cmdAdd(args)
+			})
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
 	When("links are in the initial network namespace at initial state (meaning linksInContainer is false)", func() {
 		var config string
 		BeforeEach(func() {
@@ -778,11 +907,14 @@ func checkAddReturnResult(r *types.Result, bondIfName string) {
 	}
 }
 
-func validateBondIFConf(link netlink.Link, expectedMTU int, expectedMode string, expectedMiimon int) {
+func validateBondIFConf(link netlink.Link, expectedMTU int, expectedMode string, expectedMiimon int, expectedLacpRate ...string) {
 	bond := link.(*netlink.Bond)
 	Expect(bond.Attrs().MTU).To(Equal(expectedMTU))
 	Expect(bond.Mode.String()).To(Equal(expectedMode))
 	Expect(bond.Miimon).To(Equal(expectedMiimon))
+	if len(expectedLacpRate) > 0 {
+		Expect(bond.LacpRate.String()).To(Equal(expectedLacpRate[0]))
+	}
 }
 
 func validateBondSlavesConf(link netlink.Link, slaves []string) {
